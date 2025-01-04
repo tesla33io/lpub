@@ -1,0 +1,55 @@
+#!/bin/bash
+
+PORT=${2:-8000}
+
+if [[ -z "$1" ]]; then
+    echo "Usage: $0 <file_path> [port]"
+    exit 1
+fi
+
+FILE_PATH="$1"
+
+if [[ ! -f "$FILE_PATH" ]]; then
+    echo "Error: File '$FILE_PATH' not found."
+    exit 1
+fi
+
+command -v nc &> /dev/null || { echo "Need netcat (nc)"; exit 1; }
+command -v stat &> /dev/null || { echo "Need stat(1)"; exit 1; }
+command -v jq &> /dev/null || { echo "Need jq"; exit 1; }
+command -v ip &> /dev/null || { echo "Need ip"; exit 1; }
+
+FILE_NAME=$(basename "$FILE_PATH")
+FILE_SIZE=$(stat --format="%s" "$FILE_PATH" 2>/dev/null || stat -f"%z" "$FILE_PATH")
+LANIP=$(ip -json route get 8.8.8.8 | jq -r '.[].prefsrc')
+
+echo "Serving file \`$FILE_NAME\` on:"
+echo "  * localhost:$PORT"
+echo -e "  * http://$LANIP:$PORT\n"
+
+if ! command -v qrencode &> /dev/null; then
+    echo "Please install 'qrencode' to generate QR code."
+else
+    qrencode -t ansiutf8 "http://$LANIP:$PORT"
+fi
+
+echo -e "\nPress Ctrl+C to stop...\n"
+
+exit_loop () {
+    echo -e "\n\nShutting down..."
+    exit 0
+}
+
+trap exit_loop SIGINT
+while true; do
+    # Listen for a connection
+    {
+        printf "HTTP/1.1 200 OK\r\n"
+        printf "Content-Type: application/octet-stream\r\n"
+        printf "Content-Disposition: attachment; filename=\"$FILE_NAME\"\r\n"
+        printf "Content-Length: $FILE_SIZE\r\n"
+        printf "Connection: close\r\n"
+        printf "\r\n"
+        cat "$FILE_PATH"
+    } | nc -l -p "$PORT"
+done
