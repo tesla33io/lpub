@@ -1,55 +1,112 @@
-#!/bin/bash
+#!/bin/env python3
 
-PORT=${2:-8000}
+import os
+import socket
+import sys
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from time import time
 
-if [[ -z "$1" ]]; then
-    echo "Usage: $0 <file_path> [port]"
-    exit 1
-fi
 
-FILE_PATH="$1"
+class FileRequestHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, file_path: str = None, **kwargs) -> None:
+        self.file_path: str = file_path
+        self.file_name: str = os.path.basename(file_path)
+        self.file_size: int = os.path.getsize(file_path)
+        super().__init__(*args, **kwargs)
 
-if [[ ! -f "$FILE_PATH" ]]; then
-    echo "Error: File '$FILE_PATH' not found."
-    exit 1
-fi
+    def do_GET(self) -> None:
+        if self.path == "/":
+            client_ip: str = self.client_address[0]
+            print(f"Client connected from {client_ip} at {time()}")
 
-command -v nc &> /dev/null || { echo "Need netcat (nc)"; exit 1; }
-command -v stat &> /dev/null || { echo "Need stat(1)"; exit 1; }
-command -v jq &> /dev/null || { echo "Need jq"; exit 1; }
-command -v ip &> /dev/null || { echo "Need ip"; exit 1; }
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header(
+                    "Content-Disposition", f"attachment; filename={self.file_name}"
+                )
+                self.send_header("Content-Length", str(self.file_size))
+                self.end_headers()
 
-FILE_NAME=$(basename "$FILE_PATH")
-FILE_SIZE=$(stat --format="%s" "$FILE_PATH" 2>/dev/null || stat -f"%z" "$FILE_PATH")
-LANIP=$(ip -json route get 8.8.8.8 | jq -r '.[].prefsrc')
+                with open(self.file_path, "rb") as file:
+                    bytes_sent: int = 0
+                    start_time: float = time()
+                    while chunk := file.read(8192):
+                        self.wfile.write(chunk)
+                        bytes_sent += len(chunk)
+                        self._log_progress(bytes_sent, start_time)
 
-echo "Serving file \`$FILE_NAME\` on:"
-echo "  * localhost:$PORT"
-echo -e "  * http://$LANIP:$PORT\n"
+            except Exception as e:
+                print(f"Error serving file: {e}")
+                self.send_error(500, "Internal Server Error")
+        else:
+            self.send_error(404, "Not Found")
 
-if ! command -v qrencode &> /dev/null; then
-    echo "Please install 'qrencode' to generate QR code."
-else
-    qrencode -t ansiutf8 "http://$LANIP:$PORT"
-fi
+    def _log_progress(self, bytes_sent: int, start_time: float) -> None:
+        percent: int = (bytes_sent / self.file_size) * 100
+        elapsed_time: float = time() - start_time
+        speed: int = bytes_sent / (elapsed_time + 1e-6) / 1024  # KB/s
+        sys.stdout.write(
+            f"\rProgress: {percent:.2f}% | Speed: {
+                         speed:.2f} KB/s"
+        )
+        sys.stdout.flush()
 
-echo -e "\nPress Ctrl+C to stop...\n"
 
-exit_loop () {
-    echo -e "\n\nShutting down..."
-    exit 0
-}
+def run_server(
+    file_path: str, port: int = 8000, qr_only: bool = False, url_only: bool = False
+) -> None:
+    if not os.path.isfile(file_path):
+        print(f"Error: File '{file_path}' not found.")
+        raise SystemExit(1)
 
-trap exit_loop SIGINT
-while true; do
-    # Listen for a connection
-    {
-        printf "HTTP/1.1 200 OK\r\n"
-        printf "Content-Type: application/octet-stream\r\n"
-        printf "Content-Disposition: attachment; filename=\"$FILE_NAME\"\r\n"
-        printf "Content-Length: $FILE_SIZE\r\n"
-        printf "Connection: close\r\n"
-        printf "\r\n"
-        cat "$FILE_PATH"
-    } | nc -l -p "$PORT"
-done
+    target_ip: str = socket.gethostbyname(socket.getfqdn())
+
+    if not qr_only and not url_only:
+        print(
+            "Note: if you want to access the served file you have to be on the same network as this machine."
+        )
+        print(f"Serving file '{file_path}' on port {port}")
+    if not qr_only:
+        print(f"\n  * http://{target_ip}:{port}\n")
+    if not url_only:
+        os.system(f"qrencode -t ansiutf8 'http://{target_ip}:{port}'")
+        print()
+    print("Press Ctrl+C to stop the server.\n")
+
+    server_address: tuple = ("", port)
+    handler = lambda *args, **kwargs: FileRequestHandler(
+        *args, file_path=file_path, **kwargs
+    )
+    httpd = HTTPServer(server_address, handler)
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down server...")
+    finally:
+        httpd.server_close()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} [-qr, -url] <file_path> [port]")
+        print("\t-qr : display only qr-code\n\t-url : display only url")
+        raise SystemExit(1)
+
+    qr_only: bool = False
+    url_only: bool = False
+    port: int = 8000
+    file_path: str
+
+    for arg in sys.argv:
+        if arg == "-qr":
+            qr_only = True
+        elif arg == "-url":
+            url_only = True
+        elif arg.isnumeric():
+            port = int(arg)
+        else:
+            file_path = arg
+
+    run_server(file_path, port, qr_only, url_only)
