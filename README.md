@@ -5,7 +5,7 @@ This Python script provides a convenient way to share a single file over your lo
 
 ## Dependencies
 
-This script requires a package `qrencode` ([link](https://fukuchi.org/works/qrencode/)) installed on your system.
+This script needs a package `qrencode` ([link](https://fukuchi.org/works/qrencode/)) installed on your system to be able to display qr-code.
 
 ## Features
 
